@@ -141,6 +141,78 @@ RSpec.shared_examples "Postgres state update races" do
   end
 end
 
+RSpec.shared_examples "Postgres insert listener" do
+  let(:log) { StringIO.new }
+
+  let(:client) do
+    River::Client.new(@driver, config: River::Config.new(
+      fetch_cooldown: 0.01,
+      fetch_poll_interval: 10,
+      logger: Logger.new(log),
+      queues: {"listen" => 1},
+      workers: River::Workers.new.add(Class.new do
+        def self.kind = "listen"
+
+        def work(_job) = nil
+      end)
+    ))
+  end
+
+  after { client.stop_and_cancel }
+
+  # Returns once the producer's first fetch has come back empty.
+  def start_idle_client
+    fetched = Queue.new
+    original = @driver.method(:job_get_available)
+    @driver.define_singleton_method(:job_get_available) { |**params| original.call(**params).tap { |jobs| fetched << jobs } }
+    client.start
+    expect(fetched.pop(timeout: 5)).to eq([])
+  end
+
+  def listener_pid(other_than: nil)
+    row = @driver.send(:runtime_query_rows, "SELECT current_schema() AS name").first
+    query = "LISTEN #{PG::Connection.quote_ident("#{row[:name] || row["name"]}.river_insert")}"
+    Timeout.timeout(5) do
+      loop do
+        pids = @driver.send(:runtime_query_rows, "SELECT pid FROM pg_stat_activity WHERE query = #{@driver.send(:runtime_quote, query)}")
+          .map { |pid_row| pid_row.values.first } - [other_than]
+        break pids.first unless pids.empty?
+
+        sleep 0.01
+      end
+    end
+  end
+
+  # Insert through another client, as another process would, so the worker
+  # isn't woken locally. Without a notification, it waits for its next poll.
+  def insert_and_time_start
+    subscription = client.subscribe(River::EVENT_JOB_COMPLETED)
+    inserted = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    River::Client.new(@driver).insert(River::JobArgsHash.new("listen", {}), insert_opts: River::InsertOpts.new(queue: "listen"))
+    Timeout.timeout(15) { subscription.pop }
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - inserted
+  ensure
+    subscription&.close
+  end
+
+  it "starts a job inserted into an idle client without waiting for a poll" do
+    start_idle_client
+    listener_pid
+
+    expect(insert_and_time_start).to be < 1
+  end
+
+  it "reconnects after its connection is terminated" do
+    start_idle_client
+    pid = listener_pid
+    @driver.send(:runtime_query_rows, "SELECT pg_terminate_backend(#{Integer(pid)})")
+    listener_pid(other_than: pid)
+
+    expect(insert_and_time_start).to be < 1
+    expect(log.string).to include("River insert listener failed; polling until it reconnects")
+  end
+end
+
 RSpec.shared_examples "Postgres finalized job list plans" do
   it "uses the finalized-time index for single-state listings in both directions" do
     @driver.send(:runtime_execute, <<~SQL)

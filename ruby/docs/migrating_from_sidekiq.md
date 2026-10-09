@@ -317,7 +317,8 @@ recovery, and rolling replacements. Do not keep your old application-owned signa
 loop when adopting this command.
 
 Budget database connections for workers, queue producers, maintenance, and any
-web traffic sharing a pool. Load-test the intended process count and concurrency;
+web traffic sharing a pool. On Postgres, each started client also holds one
+connection outside the pool to listen for inserted jobs. Load-test the intended process count and concurrency;
 do not set pool size equal to job concurrency without allowing overhead. Monitor
 database contention, particularly when using SQLite. Create clients after any
 prefork step. Starting a client in every web initializer starts consumers in

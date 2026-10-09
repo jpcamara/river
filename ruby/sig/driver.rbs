@@ -34,6 +34,7 @@ module River
     def queue_update: (String, metadata: Hash[untyped, untyped], ?now: Time) -> Queue?
     def queue_upsert: (String, ?metadata: Hash[untyped, untyped], ?now: Time) -> Queue?
     def transaction: [T] () { () -> T } -> T
+    def listen_for_inserts: () { (Driver::InsertListener) -> void } -> bool
 
     # this set of methods is used only in tests
     def advisory_lock_try: (Integer) -> bool
@@ -54,6 +55,16 @@ module River
       def json: (Symbol, untyped, ?type: Class?, ?strings: bool, ?default: untyped) -> untyped
       def decoded: (Symbol, untyped, ?type: Class?, ?strings: bool, ?default: untyped) -> untyped
       def finish: (JobRow) -> JobRow
+    end
+
+    class InsertListener
+      @connection: untyped
+      def initialize: (untyped) -> void
+      def wait: (Float | Integer, IO) -> Array[String]
+
+      private
+
+      def received: () -> Array[String]
     end
 
     class PostgresCapabilities
@@ -105,6 +116,7 @@ module River
       def init_driver: () -> void
       def postgres_capabilities: () -> PostgresCapabilities
       def postgres_notify_insert: (Array[JobInsertParams]) -> void
+      def listen_for_inserts: () { (InsertListener) -> void } -> bool
       def job_get_cancelled_ids: (Array[Integer]) -> Array[Integer]
       def job_complete: (id: untyped, finalized_at: untyped, ?metadata: untyped, ?now: untyped) -> untyped
       def job_cancel: (untyped, ?now: untyped) -> untyped
@@ -166,6 +178,7 @@ module River
       def runtime_unique_violation_class: () -> singleton(Exception)
       def runtime_update_value: (untyped, untyped) -> untyped
       def runtime_value: (untyped, untyped) -> untyped
+      def runtime_with_dedicated_connection: () { (untyped) -> void } -> void
       def transaction: () { () -> untyped } -> untyped
     end
   end

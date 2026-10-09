@@ -26,6 +26,16 @@ module River::Driver
       end
     end
 
+    # Yields an InsertListener on a connection outside the application's pool,
+    # closing it afterward. Returns false without yielding when the database
+    # can't deliver notifications, leaving the client to poll.
+    def listen_for_inserts
+      return false unless runtime_postgres? && postgres_capabilities.supports_listen_notify
+
+      runtime_with_dedicated_connection { |connection| yield InsertListener.new(connection) }
+      true
+    end
+
     # Notifications and rows must commit together. The insertion drivers call
     # this inside their transaction; Postgres defers delivery until commit.
     private def postgres_notify_insert(params)

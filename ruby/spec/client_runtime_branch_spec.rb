@@ -387,7 +387,7 @@ RSpec.describe River::ClientRuntime do
       raise "temporary producer failure"
     end
     value = runtime(driver: driver)
-    value.define_singleton_method(:wait) { |_duration| @stop_requested = true if attempts == 2 }
+    value.define_singleton_method(:wait) { |_duration, _queue = nil| @stop_requested = true if attempts == 2 }
 
     expect { value.send(:producer_loop, "branch", River::QueueConfig.new(max_workers: 1)) }.not_to raise_error
     expect(attempts).to eq(2)
@@ -401,7 +401,7 @@ RSpec.describe River::ClientRuntime do
       raise "terminal producer failure"
     end
     value = runtime(driver: driver)
-    value.define_singleton_method(:wait) { |_duration| @stop_requested = true }
+    value.define_singleton_method(:wait) { |_duration, _queue = nil| @stop_requested = true }
 
     expect { value.send(:producer_loop, "branch", River::QueueConfig.new(max_workers: 1)) }.not_to raise_error
     expect(attempts).to eq(1)
@@ -416,7 +416,7 @@ RSpec.describe River::ClientRuntime do
       []
     end
     value = runtime(driver: driver)
-    value.define_singleton_method(:wait) { |_duration| @stop_requested = true }
+    value.define_singleton_method(:wait) { |_duration, _queue = nil| @stop_requested = true }
 
     value.send(:producer_loop, "branch", River::QueueConfig.new(max_workers: 1))
 
@@ -437,7 +437,7 @@ RSpec.describe River::ClientRuntime do
     value = runtime(driver: driver)
     value.define_singleton_method(:monotonic_now) { now }
     value.define_singleton_method(:launch) { |_| @stop_requested = true if fetched_at.length == 2 }
-    value.define_singleton_method(:wait) do |duration|
+    value.define_singleton_method(:wait) do |duration, _queue = nil|
       waits << duration
       now += (waits.length == 1) ? 0.25 : duration
     end
@@ -461,7 +461,7 @@ RSpec.describe River::ClientRuntime do
     value = runtime(driver: driver)
     value.define_singleton_method(:monotonic_now) { now }
     value.define_singleton_method(:launch) { |_| }
-    value.define_singleton_method(:wait) { |_| @stop_requested = true }
+    value.define_singleton_method(:wait) { |_, _ = nil| @stop_requested = true }
 
     value.send(:producer_loop, "branch", River::QueueConfig.new(max_workers: 1, fetch_cooldown: 1, fetch_poll_interval: 1))
 
@@ -487,7 +487,7 @@ RSpec.describe River::ClientRuntime do
     value.define_singleton_method(:launch) do |job|
       @running[job.id] = {queue: "branch", thread: Thread.current, working: true}
     end
-    value.define_singleton_method(:wait) { |_| @stop_requested = true }
+    value.define_singleton_method(:wait) { |_, _ = nil| @stop_requested = true }
     value.define_singleton_method(:wait_for_running_jobs) { |_, _| @running.clear }
 
     value.send(:producer_loop, "branch", River::QueueConfig.new(max_workers: 2, fetch_cooldown: 1, fetch_poll_interval: 1))
@@ -510,7 +510,7 @@ RSpec.describe River::ClientRuntime do
     value = runtime(driver: driver)
     value.define_singleton_method(:monotonic_now) { now }
     value.define_singleton_method(:launch) { |_| @stop_requested = true if fetched_at.length == 2 }
-    value.define_singleton_method(:wait) do |duration|
+    value.define_singleton_method(:wait) do |duration, _queue = nil|
       @stop_requested = true if paused_at
       paused_at = Time.now.utc
       now += duration
@@ -531,7 +531,7 @@ RSpec.describe River::ClientRuntime do
       checks >= 2
     end
 
-    value.define_singleton_method(:wait) { |_duration| }
+    value.define_singleton_method(:wait) { |_duration, _queue = nil| }
 
     value.send(:maintenance_loop)
 
@@ -546,7 +546,7 @@ RSpec.describe River::ClientRuntime do
       driver.define_singleton_method(method) { |**_options| calls << method }
     end
     value = runtime(driver: driver)
-    value.define_singleton_method(:wait) { |_duration| @stop_requested = true }
+    value.define_singleton_method(:wait) { |_duration, _queue = nil| @stop_requested = true }
 
     value.send(:maintenance_loop)
     expect(calls).to eq([:job_schedule, :job_rescue_stuck, :job_delete_finalized])
@@ -562,7 +562,7 @@ RSpec.describe River::ClientRuntime do
       checks >= 3
     end
 
-    value.define_singleton_method(:wait) { |_duration| }
+    value.define_singleton_method(:wait) { |_duration, _queue = nil| }
 
     expect { value.send(:maintenance_loop) }.not_to raise_error
     expect(checks).to eq(3)
@@ -578,7 +578,7 @@ RSpec.describe River::ClientRuntime do
       checks >= 2
     end
 
-    value.define_singleton_method(:wait) { |_duration| }
+    value.define_singleton_method(:wait) { |_duration, _queue = nil| }
 
     expect { value.send(:maintenance_loop) }.not_to raise_error
     expect(checks).to eq(2)
@@ -792,7 +792,7 @@ RSpec.describe River::ClientRuntime do
     condition = Object.new
     condition.define_singleton_method(:wait) { |mutex, duration| waits << [mutex.owned?, duration] }
     value = runtime
-    value.instance_variable_set(:@condition, condition)
+    value.instance_variable_set(:@producer_conditions, {"branch" => condition})
     value.instance_variable_set(:@stop_requested, true)
     running = {1 => {queue: "branch"}, 2 => {queue: "other"}}
     value.instance_variable_set(:@running, running)
@@ -802,5 +802,180 @@ RSpec.describe River::ClientRuntime do
     value.send(:wait_for_running_jobs, "branch", 2)
 
     expect(waits).to eq([[true, 2]])
+  end
+
+  describe "insert listener" do
+    # Stands in for Driver::InsertListener: notifications arrive through a pipe
+    # so a wait ends for a payload, the runtime's interrupt, or its timeout.
+    let(:fake_listener_class) do
+      Class.new do
+        def initialize
+          @payloads = Queue.new
+          @reader, @writer = IO.pipe
+        end
+
+        def notify(payload)
+          @payloads << payload
+          @writer.write(".")
+        end
+
+        def wait(timeout, interrupt)
+          IO.select([@reader, interrupt], nil, nil, timeout)
+          @reader.read_nonblock(64, exception: false)
+          Array.new(@payloads.size) { @payloads.pop }
+        end
+      end
+    end
+
+    def listening_runtime(queues:, listen: nil, logger: Logger.new(StringIO.new), cooldown: 0.001, poll_interval: 10)
+      fetches = Queue.new
+      listener = fake_listener_class.new
+      driver = Object.new
+      driver.define_singleton_method(:queue_upsert) { |_name| }
+      driver.define_singleton_method(:queue_get) { |_name| }
+      driver.define_singleton_method(:job_get_cancelled_ids) { |_ids| [] }
+      driver.define_singleton_method(:job_get_available) do |queue:, **|
+        fetches << [queue, Process.clock_gettime(Process::CLOCK_MONOTONIC)]
+        []
+      end
+      driver.define_singleton_method(:listen_for_inserts) do |&block|
+        next listen.call(block) if listen
+
+        block.call(listener)
+        true
+      end
+      value = described_class.new(Object.new, driver, River::Config.new(
+        id: "branch-runtime",
+        fetch_cooldown: cooldown,
+        fetch_poll_interval: poll_interval,
+        leader_election_disabled: true,
+        logger: logger,
+        queues: queues,
+        workers: River::Workers.new.add("branch_worker", Object.new)
+      ))
+      [value, listener, fetches]
+    end
+
+    def next_fetch(fetches, timeout: 1)
+      fetches.pop(timeout: timeout)
+    end
+
+    it "wakes only the producer for the notified queue" do
+      value, listener, fetches = listening_runtime(queues: {"branch" => 1, "other" => 1})
+      value.start
+      2.times { next_fetch(fetches) }
+
+      listener.notify(JSON.generate(queue: "other"))
+      expect(next_fetch(fetches)&.first).to eq("other")
+      expect(next_fetch(fetches, timeout: 0.2)).to be_nil
+
+      listener.notify(JSON.generate(queue: "branch"))
+      expect(next_fetch(fetches)&.first).to eq("branch")
+    ensure
+      value&.stop
+    end
+
+    it "remembers a notification that arrives while the producer is fetching" do
+      value, _listener, fetches = listening_runtime(queues: {"branch" => 1})
+      value.start
+      next_fetch(fetches)
+      # The producer is not waiting, so only the remembered flag can wake it.
+      value.instance_variable_get(:@mutex).synchronize { value.instance_variable_get(:@inserted_queues)["branch"] = true }
+
+      expect(value.send(:wait, 10, "branch")).to be_nil
+      expect(value.instance_variable_get(:@inserted_queues)).to be_empty
+    ensure
+      value&.stop
+    end
+
+    it "still applies the fetch cooldown after a notification" do
+      value, listener, fetches = listening_runtime(queues: {"branch" => 1}, cooldown: 0.5)
+      value.start
+      _queue, first = next_fetch(fetches)
+
+      listener.notify(JSON.generate(queue: "branch"))
+      _queue, second = next_fetch(fetches)
+
+      expect(second - first).to be >= 0.5
+    ensure
+      value&.stop
+    end
+
+    it "ignores and logs malformed payloads and notifications for unknown queues" do
+      output = StringIO.new
+      value, listener, fetches = listening_runtime(queues: {"branch" => 1}, logger: Logger.new(output))
+      value.start
+      next_fetch(fetches)
+
+      ["not json", "[]", JSON.generate(queue: "missing")].each { |payload| listener.notify(payload) }
+
+      expect(next_fetch(fetches, timeout: 0.2)).to be_nil
+      expect(output.string).to include("River insert notification has an invalid payload")
+    ensure
+      value&.stop
+    end
+
+    it "logs listener failures, keeps polling, and retries with a backoff" do
+      output = StringIO.new
+      attempts = 0
+      listen = ->(_block) do
+        attempts += 1
+        raise "listener connection refused"
+      end
+      value, _listener, fetches = listening_runtime(queues: {"branch" => 1}, listen: listen, logger: Logger.new(output), poll_interval: 0.01)
+      value.start
+      3.times { expect(next_fetch(fetches)).not_to be_nil }
+
+      expect(output.string).to include("River insert listener failed; polling until it reconnects", "listener connection refused")
+      expect(attempts).to eq(1)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      value.stop
+      expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 0.5
+    ensure
+      value&.stop
+    end
+
+    it "stops promptly while the listener is idle" do
+      value, _listener, fetches = listening_runtime(queues: {"branch" => 1})
+      value.start
+      next_fetch(fetches)
+      thread = value.instance_variable_get(:@insert_listener_thread)
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      value.stop
+
+      expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 0.5
+      expect(thread).not_to be_alive
+      expect(value.instance_variable_get(:@insert_listener_interrupt)).to be_nil
+    end
+
+    it "exits without errors when the database can't deliver notifications" do
+      output = StringIO.new
+      value, _listener, fetches = listening_runtime(queues: {"branch" => 1}, listen: ->(_block) { false }, logger: Logger.new(output))
+      value.start
+      next_fetch(fetches)
+      value.instance_variable_get(:@insert_listener_thread).join(1)
+
+      expect(value.instance_variable_get(:@insert_listener_thread)).not_to be_alive
+      expect(output.string).to be_empty
+    ensure
+      value&.stop
+    end
+
+    it "keeps one listener when a queue is added and starts none before the client starts" do
+      value, _listener, fetches = listening_runtime(queues: {"branch" => 1})
+      value.send(:start_insert_listener)
+      expect(value.instance_variable_get(:@insert_listener_thread)).to be_nil
+
+      value.start
+      thread = value.instance_variable_get(:@insert_listener_thread)
+      value.queue_add("added", 1)
+      2.times { next_fetch(fetches) }
+
+      expect(value.instance_variable_get(:@insert_listener_thread)).to equal(thread)
+    ensure
+      value&.stop
+    end
   end
 end

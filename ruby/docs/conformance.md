@@ -39,11 +39,12 @@ protocol is not part of the Ruby API.
 
 ## Coverage gaps and API differences
 
-Ruby's runtime still polls job and queue state rather than consuming Postgres
-LISTEN events or the SQLite outbox. The fixture target checks notification
-emission, not dispatch. Ruby does not emit or handle `request_resign`; other
-clients' requests therefore cannot force a Ruby leader to resign. Completing
-that coverage would require a notification listener and runtime dispatch path.
+Ruby's runtime listens for Postgres insert notifications, but still polls queue
+state and cancellations rather than consuming other LISTEN events or the SQLite
+outbox. The fixture target checks notification emission, not dispatch. Ruby
+does not emit or handle `request_resign`; other clients' requests therefore
+cannot force a Ruby leader to resign. Completing that coverage would require
+dispatching control and leadership notifications in the runtime.
 The ordinary driver suites verify Postgres delivery, commit ordering, and
 rollback for queue controls and resignations as well as insertion/cancellation.
 

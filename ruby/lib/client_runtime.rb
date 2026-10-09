@@ -6,6 +6,10 @@ module River
   class ClientRuntime
     class Interrupted < StandardError; end
 
+    # Matches Go's notifier: an idle listener pings its connection this often so
+    # a dropped connection is noticed and replaced.
+    INSERT_LISTENER_PING_INTERVAL = 5
+
     # Keep wall time for queue latency and error timestamps, and monotonic time
     # for execution and completion durations. Externally executed jobs start
     # with no locally observed execution time. Snapshot queue latency before
@@ -28,7 +32,9 @@ module River
       @condition = ConditionVariable.new
       @config = config
       @driver = driver
+      @inserted_queues = {}
       @mutex = Mutex.new
+      @producer_conditions = {}
       @producer_threads = {}
       @queue_configs = config.queues.dup
       @removed_queues = {}
@@ -139,6 +145,7 @@ module River
           raise
         end
         start_maintenance
+        start_insert_listener
       end
 
       wake
@@ -154,7 +161,7 @@ module River
         end
 
         @removed_queues[name] = true
-        @condition.broadcast
+        broadcast
         @producer_threads[name]
       end
 
@@ -166,6 +173,8 @@ module River
 
       @mutex.synchronize do
         @queue_configs.delete(name)
+        @inserted_queues.delete(name)
+        @producer_conditions.delete(name)
         @producer_threads.delete(name)
       end
 
@@ -185,6 +194,7 @@ module River
       begin
         queues = @mutex.synchronize { @queue_configs.dup }
         queues.each { |name, queue_config| start_producer(name, queue_config) }
+        start_insert_listener unless queues.empty?
         start_maintenance unless @queue_configs.empty? && @periodic_jobs.empty? && @config.maintenance_services.empty?
 
         self
@@ -206,7 +216,8 @@ module River
         end
 
         @stop_requested = true
-        @condition.broadcast
+        broadcast
+        @insert_listener_interrupt&.write_nonblock(".", exception: false)
         @running.values.each { |entry| entry[:thread].raise(Interrupted) if cancel && entry[:working] }
         @threads.dup
       end
@@ -245,7 +256,7 @@ module River
     end
 
     def wake
-      @mutex.synchronize { @condition.broadcast }
+      @mutex.synchronize { broadcast }
     end
 
     private def begin_work(id)
@@ -260,6 +271,13 @@ module River
       end
 
       raise Interrupted if should_interrupt
+    end
+
+    # Callers hold @mutex. Producers wait on their own condition so an insert
+    # notification wakes only its queue; everything else wakes all of them.
+    private def broadcast
+      @condition.broadcast
+      @producer_conditions.each_value(&:broadcast)
     end
 
     private def check_remote_cancellations(queue)
@@ -338,7 +356,7 @@ module River
       ensure
         @mutex.synchronize do
           @running.delete(row.id)
-          @condition.broadcast
+          broadcast
         end
       end
     end
@@ -415,6 +433,31 @@ module River
         entry = @running[id]
         entry[:working] = false if entry
       end
+    end
+
+    # Producers keep polling, so the listener only shortens the time to start a
+    # newly inserted job. It reconnects after failures with a capped backoff.
+    private def insert_listener_loop(interrupt, interrupt_writer)
+      failures = 0
+      until stopping?
+        begin
+          supported = @driver.listen_for_inserts do |listener|
+            until stopping?
+              listener.wait(INSERT_LISTENER_PING_INTERVAL, interrupt).each { |payload| notify_insert(payload) }
+              failures = 0
+            end
+          end
+          break unless supported
+        rescue => error
+          failures += 1
+          @config.logger.error("River insert listener failed; polling until it reconnects: #{error.full_message}")
+          wait([1 << (failures - 1), 30].min)
+        end
+      end
+    ensure
+      @mutex.synchronize { @insert_listener_interrupt = nil }
+      interrupt_writer.close
+      interrupt.close
     end
 
     private def invoke_plugins(name, ...)
@@ -536,6 +579,23 @@ module River
       ((count + 1 + (1 << 63)) % (1 << 64)) - (1 << 63)
     end
 
+    # Ruby and Go inserts both send {"queue": name}. Remember the notification
+    # for a producer that's busy fetching so it fetches again instead of
+    # waiting for a poll.
+    private def notify_insert(payload)
+      decoded = JSON.parse(payload)
+      queue = decoded["queue"] if decoded.is_a?(Hash)
+      @mutex.synchronize do
+        condition = @producer_conditions[queue]
+        if condition
+          @inserted_queues[queue] = true
+          condition.broadcast
+        end
+      end
+    rescue JSON::ParserError => error
+      @config.logger.error("River insert notification has an invalid payload: #{error.message}")
+    end
+
     private def perform_work(worker, job)
       timeout = worker_timeout(worker, job)
       result = timeout ? Timeout.timeout(timeout) { worker.work(job) } : worker.work(job)
@@ -570,7 +630,7 @@ module River
           # Inserts, completions, and spurious condition wakes must not bypass
           # the minimum interval between database fetches.
           while (sleep_for = cooldown - (monotonic_now - last_fetch)).positive? && !queue_stopping?(queue)
-            wait(sleep_for)
+            wait(sleep_for, queue)
           end
           next if queue_stopping?(queue)
 
@@ -584,14 +644,14 @@ module River
           end
         end
 
-        wait(poll_interval)
+        wait(poll_interval, queue)
       end
     rescue => error
       @config.logger.error("River producer for #{queue.inspect} stopped: #{error.full_message}")
       if queue_stopping?(queue)
         wait_for_running_jobs(queue, poll_interval || @config.fetch_poll_interval)
       else
-        wait(poll_interval || @config.fetch_poll_interval)
+        wait(poll_interval || @config.fetch_poll_interval, queue)
       end
       retry unless queue_stopping?(queue) && running_count(queue).zero?
     end
@@ -667,6 +727,21 @@ module River
       @mutex.synchronize { @running.count { |_id, entry| entry[:queue] == queue } }
     end
 
+    private def start_insert_listener
+      return unless @driver.respond_to?(:listen_for_inserts)
+
+      @mutex.synchronize do
+        return unless @started && !@stop_requested
+        return if @insert_listener_thread&.alive?
+
+        interrupt, writer = IO.pipe
+        @insert_listener_interrupt = writer
+        thread = Thread.new { insert_listener_loop(interrupt, writer) }
+        @insert_listener_thread = thread
+        @threads << thread
+      end
+    end
+
     private def start_maintenance
       return if @config.leader_election_disabled
 
@@ -685,6 +760,7 @@ module River
       @mutex.synchronize do
         return if @stop_requested || @removed_queues[name] || @producer_threads.key?(name)
 
+        @producer_conditions[name] ||= ConditionVariable.new
         # Shutdown must see every launched thread, including a producer whose
         # database setup overlapped a stop or queue removal.
         thread = Thread.new { producer_loop(name, queue_config) }
@@ -697,15 +773,25 @@ module River
       @mutex.synchronize { @stop_requested }
     end
 
-    private def wait(duration)
-      @mutex.synchronize { @condition.wait(@mutex, duration) unless @stop_requested }
+    # A producer's wait also ends for an insert notification for its queue,
+    # including one that arrived while it was fetching rather than waiting.
+    # Consuming the notification keeps the cooldown loop from spinning on it.
+    private def wait(duration, queue = nil)
+      @mutex.synchronize do
+        next if @stop_requested
+        next @condition.wait(@mutex, duration) unless queue
+        next if @inserted_queues.delete(queue)
+
+        @producer_conditions.fetch(queue).wait(@mutex, duration)
+        @inserted_queues.delete(queue)
+      end
     end
 
     private def wait_for_running_jobs(queue, duration)
       @mutex.synchronize do
         # Draining still needs a poll interval after stop is requested. Check
         # under the same mutex as completion so the last job's wake isn't lost.
-        @condition.wait(@mutex, duration) if @running.any? { |_id, entry| entry[:queue] == queue }
+        @producer_conditions.fetch(queue).wait(@mutex, duration) if @running.any? { |_id, entry| entry[:queue] == queue }
       end
     end
 

@@ -43,7 +43,9 @@ application code. It can return an ActiveRecord-backed client or a
 `River::Pro::Client` instead. Pro must be installed and required by the application;
 the command does not load it automatically. Pool sizing is application-specific:
 allow connections for queue producers, maintenance, and application database work
-as well as worker threads. The example's pool size is illustrative.
+as well as worker threads. The example's pool size is illustrative. On Postgres,
+each started client also holds one connection outside the pool to listen for
+inserted jobs; count it against the server's connection limit.
 
 ## Rails
 

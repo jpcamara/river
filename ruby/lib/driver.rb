@@ -49,5 +49,6 @@ module River
 end
 
 require_relative "driver/postgres_capabilities"
+require_relative "driver/insert_listener"
 require_relative "driver/job_row_decoder"
 require_relative "driver/runtime"
