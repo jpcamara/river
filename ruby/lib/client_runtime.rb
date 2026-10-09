@@ -634,6 +634,10 @@ module River
           end
           next if queue_stopping?(queue)
 
+          # Jobs may finish during the cooldown, so count free slots again
+          # right before fetching.
+          capacity = queue_config.max_workers - running_count(queue)
+
           # A pause may arrive during cooldown; only read the queue immediately
           # before fetching, and avoid the read entirely when all slots are busy.
           unless @driver.queue_get(queue)&.paused_at

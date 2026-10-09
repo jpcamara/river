@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Clients on Postgres listen for job insertions and wake the producer for the inserted job's queue, so an idle client starts new jobs without waiting for `fetch_poll_interval`. `fetch_cooldown` still applies. Each started client holds one dedicated connection outside the driver's pool for the listener. Polling continues as the fallback on SQLite, on Yugabyte without `yb_enable_listen_notify`, and while a failed listener reconnects.
 
+### Fixed
+
+- A producer counts its free worker slots again after waiting out `fetch_cooldown`, so it fetches for every slot that opened during the wait. Before, it fetched only the slots that were free when it woke, which held a busy queue to a few jobs per fetch.
+
 ## [0.13.0] - 2026-10-08
 
 ### Added
