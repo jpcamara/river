@@ -448,6 +448,41 @@ RSpec.describe River::ClientRuntime do
     expect(waits).to eq([1.0, 0.75])
   end
 
+  it "fetches for every slot that frees up during the fetch cooldown" do
+    now = 100.0
+    requested = []
+    next_id = 0
+    make_row = ->(id) { row(id: id) }
+    driver = Object.new
+    driver.define_singleton_method(:queue_get) { |_| nil }
+    driver.define_singleton_method(:job_get_cancelled_ids) { |_| [] }
+    driver.define_singleton_method(:job_get_available) do |max:, **|
+      requested << max
+      Array.new(max) { make_row.call(next_id += 1) }
+    end
+    value = runtime(driver: driver)
+    value.define_singleton_method(:wait_for_running_jobs) { |_, _| @running.clear }
+    value.define_singleton_method(:monotonic_now) { now }
+    value.define_singleton_method(:launch) do |job|
+      @running[job.id] = {queue: "branch", thread: Thread.current, working: true}
+      @stop_requested = true if requested.length == 2
+    end
+    # Every slot fills, so the producer waits to poll. A finishing job wakes
+    # it early, after 0.1s. It then waits out the rest of the fetch cooldown,
+    # and two more jobs finish during that wait.
+    waits = 0
+    value.define_singleton_method(:wait) do |duration|
+      waits += 1
+      freed = (waits == 1) ? 1 : 2
+      freed.times { @running.delete(@running.keys.first) }
+      now += (waits == 1) ? 0.1 : duration
+    end
+
+    value.send(:producer_loop, "branch", River::QueueConfig.new(max_workers: 4, fetch_cooldown: 1, fetch_poll_interval: 1))
+
+    expect(requested).to eq([4, 3])
+  end
+
   it "stops a producer woken during its fetch cooldown without another fetch" do
     now = 100.0
     fetched_at = []
