@@ -321,6 +321,12 @@ config = River::Config.new(queues: {
 })
 ```
 
+On Postgres, a started client listens for job insertions on one dedicated
+connection, opened outside the driver's pool, and wakes the producer for the
+inserted job's queue. `fetch_cooldown` still limits how often a producer fetches.
+`fetch_poll_interval` remains the fallback, including on SQLite, on Yugabyte
+without notifications, and while the listener reconnects after a failure.
+
 Queues may also be added and removed at runtime with `client.queue_add(name, config)` and `client.queue_remove(name)`.
 Queue removal stops fetching and keeps observing cancellation requests until its
 active jobs finish. Removing a queue from one of its own workers raises

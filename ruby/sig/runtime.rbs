@@ -321,6 +321,8 @@ module River
     class Interrupted < StandardError
     end
 
+    INSERT_LISTENER_PING_INTERVAL: Integer
+
     class JobTiming
       attr_accessor finished_monotonic: Float
       attr_reader queue_wait_duration: Float
@@ -334,10 +336,14 @@ module River
     @condition: ConditionVariable
     @config: Config
     @driver: _Driver
+    @inserted_queues: Hash[String, bool]
+    @insert_listener_interrupt: IO?
+    @insert_listener_thread: Thread?
     @maintenance_thread: Thread?
     @mutex: Mutex
     @periodic_jobs: PeriodicJobBundle
     @performing: bool?
+    @producer_conditions: Hash[String, ConditionVariable]
     @producer_threads: Hash[String, Thread]
     @queue_configs: Hash[String, QueueConfig]
     @removed_queues: Hash[String, bool]
@@ -367,6 +373,7 @@ module River
     private
 
     def begin_work: (Integer) -> untyped
+    def broadcast: () -> untyped
     def check_remote_cancellations: (String) -> untyped
     def error_handler_cancel?: (Exception, Job) -> bool
     def execute: (JobRow) -> untyped
@@ -374,6 +381,7 @@ module River
     def finish_interrupted: (JobRow, Job, JobTiming) -> untyped
     def finish_snoozed: (JobRow, Job, JobSnoozeError, JobTiming) -> untyped
     def finish_work: (Integer) -> untyped
+    def insert_listener_loop: (IO, IO) -> untyped
     def invoke_plugins: (Symbol, *untyped) -> Array[untyped]
     def invoke_worker: (untyped, Job) -> untyped
     def launch: (JobRow) -> untyped
@@ -382,6 +390,7 @@ module River
     def next_retry: (JobRow, Exception, Time, ?worker: untyped) -> Time
     def next_snooze_count: (untyped) -> Integer
     def retry_allowed?: (untyped, Job, Exception) -> untyped
+    def notify_insert: (String) -> untyped
     def perform_work: (untyped, Job) -> untyped
     def periodic_jobs_changed: () -> untyped
     def producer_loop: (String, QueueConfig) -> untyped
@@ -392,10 +401,11 @@ module River
     def resolve_worker: (String) -> untyped
     def run_periodic: (Time) -> untyped
     def running_count: (String) -> Integer
+    def start_insert_listener: () -> untyped
     def start_maintenance: () -> untyped
     def start_producer: (String, QueueConfig) -> untyped
     def stopping?: () -> bool
-    def wait: (Float | Integer) -> untyped
+    def wait: (Float | Integer, ?String?) -> untyped
     def wait_for_running_jobs: (String, Float | Integer) -> untyped
     def worker_timeout: (untyped, Job) -> Float?
   end

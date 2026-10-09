@@ -229,6 +229,17 @@ module River::Driver
       row[key] || row[key.to_s]
     end
 
+    # Connects with the database's options, including its search path, but
+    # outside its connection pool.
+    private def runtime_with_dedicated_connection
+      connection = @db.new_connection(:default)
+      begin
+        yield connection
+      ensure
+        @db.disconnect_connection(connection)
+      end
+    end
+
     private def sqlite_insert_params_to_hash(insert_params, nonce)
       {
         args: JSON.parse(insert_params.encoded_args),

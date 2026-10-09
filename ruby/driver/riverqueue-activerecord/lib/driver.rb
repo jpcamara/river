@@ -260,6 +260,17 @@ module River::Driver
       row[key.to_s] || row[key]
     end
 
+    # Connects with the pool's configuration, including its search path, but
+    # never checks the connection out of or back into the pool.
+    private def runtime_with_dedicated_connection
+      adapter = @connection_class.connection_pool.db_config.new_connection
+      begin
+        yield adapter.raw_connection
+      ensure
+        adapter.disconnect!
+      end
+    end
+
     private def sqlite_insert_params_to_hash(insert_params, nonce)
       {
         args: JSON.parse(insert_params.encoded_args),

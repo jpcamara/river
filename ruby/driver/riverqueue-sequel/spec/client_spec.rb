@@ -27,6 +27,7 @@ RSpec.describe "Sequel client integration" do
       it_behaves_like "Postgres state update races" if adapter == :postgres
       it_behaves_like "SQLite corrupt job runtime" if adapter == :sqlite
       it_behaves_like "Postgres insert notifications" if adapter == :postgres
+      it_behaves_like "Postgres insert listener" if adapter == :postgres
       it_behaves_like "Postgres cancellation notifications" if adapter == :postgres
       it_behaves_like "Postgres leadership notifications" if adapter == :postgres
       it_behaves_like "Postgres queue control notifications" if adapter == :postgres
