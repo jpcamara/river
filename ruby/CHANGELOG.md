@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A producer counts its free worker slots again after waiting out `fetch_cooldown`, so it fetches for every slot that opened during the wait. Before, it fetched only the slots that were free when it woke, which held a busy queue to a few jobs per fetch.
+
 ## [0.13.0] - 2026-10-08
 
 ### Added
