@@ -252,6 +252,19 @@ module River::Driver
       with_connection { |connection| connection.quote(value) }
     end
 
+    # Runs an UPDATE on river_job and decodes the rows it changed.
+    private def runtime_returning_jobs(sql)
+      if @is_sqlite
+        rows = with_connection { |connection| connection.raw_connection.execute("#{sql}\nRETURNING #{SQLITE_JOB_COLUMNS}").to_a }
+        rows.map { |row| runtime_decoded_job { sqlite_to_job_row_from_raw(row) } }
+      else
+        result = with_connection { |connection| connection.select_all("#{sql}\nRETURNING river_job.*") }
+        result.rows.map do |row|
+          runtime_decoded_job { postgres_to_job_row_from_raw(row, result.columns, result.column_types).first }
+        end
+      end
+    end
+
     private def runtime_unique_violation_class
       ::ActiveRecord::RecordNotUnique
     end
