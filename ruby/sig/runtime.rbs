@@ -339,6 +339,7 @@ module River
 
     @client: Client
     @condition: ConditionVariable
+    @maintenance_condition: ConditionVariable
     @config: Config
     @driver: _Driver
     @maintenance_thread: Thread?
@@ -402,7 +403,7 @@ module River
     def start_maintenance: () -> untyped
     def start_producer: (String, QueueConfig) -> untyped
     def stopping?: () -> bool
-    def wait: (Float | Integer) -> untyped
+    def wait: (Float | Integer, ?ConditionVariable) -> untyped
     def wait_for_running_jobs: (String, Float | Integer) -> untyped
     def worker_timeout: (untyped, Job) -> Float?
   end
