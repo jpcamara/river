@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Allow `River::Workers#add` to register a kind and a work block, using the client's default retry and timeout policies. [PR #1486](https://github.com/riverqueue/river/pull/1486).
 
+### Fixed
+
+- The Active Record driver borrows a connection for each call instead of leasing one to the calling thread. Each job left a leased connection on its finished thread, and Active Record reset every one when it reclaimed it.
+
 ## [0.13.0] - 2026-10-08
 
 ### Added
