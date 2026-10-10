@@ -26,6 +26,9 @@ module River
     def initialize(client, driver, config)
       @client = client
       @condition = ConditionVariable.new
+      # The maintenance loop waits apart from producers, so job completions
+      # don't wake it into a leader election.
+      @maintenance_condition = ConditionVariable.new
       @config = config
       @driver = driver
       @mutex = Mutex.new
@@ -207,6 +210,7 @@ module River
 
         @stop_requested = true
         @condition.broadcast
+        @maintenance_condition.broadcast
         @running.values.each { |entry| entry[:thread].raise(Interrupted) if cancel && entry[:working] }
         @threads.dup
       end
@@ -496,11 +500,11 @@ module River
           end
         end
 
-        wait(5)
+        wait(5, @maintenance_condition)
       end
     rescue => error
       @config.logger.error("River maintenance stopped: #{error.full_message}")
-      wait(5)
+      wait(5, @maintenance_condition)
       retry unless stopping?
     end
 
@@ -697,8 +701,8 @@ module River
       @mutex.synchronize { @stop_requested }
     end
 
-    private def wait(duration)
-      @mutex.synchronize { @condition.wait(@mutex, duration) unless @stop_requested }
+    private def wait(duration, condition = @condition)
+      @mutex.synchronize { condition.wait(@mutex, duration) unless @stop_requested }
     end
 
     private def wait_for_running_jobs(queue, duration)

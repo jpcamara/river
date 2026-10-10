@@ -387,7 +387,7 @@ RSpec.describe River::ClientRuntime do
       raise "temporary producer failure"
     end
     value = runtime(driver: driver)
-    value.define_singleton_method(:wait) { |_duration| @stop_requested = true if attempts == 2 }
+    value.define_singleton_method(:wait) { |_duration, _condition = nil| @stop_requested = true if attempts == 2 }
 
     expect { value.send(:producer_loop, "branch", River::QueueConfig.new(max_workers: 1)) }.not_to raise_error
     expect(attempts).to eq(2)
@@ -401,7 +401,7 @@ RSpec.describe River::ClientRuntime do
       raise "terminal producer failure"
     end
     value = runtime(driver: driver)
-    value.define_singleton_method(:wait) { |_duration| @stop_requested = true }
+    value.define_singleton_method(:wait) { |_duration, _condition = nil| @stop_requested = true }
 
     expect { value.send(:producer_loop, "branch", River::QueueConfig.new(max_workers: 1)) }.not_to raise_error
     expect(attempts).to eq(1)
@@ -416,7 +416,7 @@ RSpec.describe River::ClientRuntime do
       []
     end
     value = runtime(driver: driver)
-    value.define_singleton_method(:wait) { |_duration| @stop_requested = true }
+    value.define_singleton_method(:wait) { |_duration, _condition = nil| @stop_requested = true }
 
     value.send(:producer_loop, "branch", River::QueueConfig.new(max_workers: 1))
 
@@ -531,7 +531,7 @@ RSpec.describe River::ClientRuntime do
       checks >= 2
     end
 
-    value.define_singleton_method(:wait) { |_duration| }
+    value.define_singleton_method(:wait) { |_duration, _condition = nil| }
 
     value.send(:maintenance_loop)
 
@@ -546,7 +546,7 @@ RSpec.describe River::ClientRuntime do
       driver.define_singleton_method(method) { |**_options| calls << method }
     end
     value = runtime(driver: driver)
-    value.define_singleton_method(:wait) { |_duration| @stop_requested = true }
+    value.define_singleton_method(:wait) { |_duration, _condition = nil| @stop_requested = true }
 
     value.send(:maintenance_loop)
     expect(calls).to eq([:job_schedule, :job_rescue_stuck, :job_delete_finalized])
@@ -562,7 +562,7 @@ RSpec.describe River::ClientRuntime do
       checks >= 3
     end
 
-    value.define_singleton_method(:wait) { |_duration| }
+    value.define_singleton_method(:wait) { |_duration, _condition = nil| }
 
     expect { value.send(:maintenance_loop) }.not_to raise_error
     expect(checks).to eq(3)
@@ -578,7 +578,7 @@ RSpec.describe River::ClientRuntime do
       checks >= 2
     end
 
-    value.define_singleton_method(:wait) { |_duration| }
+    value.define_singleton_method(:wait) { |_duration, _condition = nil| }
 
     expect { value.send(:maintenance_loop) }.not_to raise_error
     expect(checks).to eq(2)
@@ -606,7 +606,7 @@ RSpec.describe River::ClientRuntime do
     healthy_service.define_singleton_method(:run) { |*_args| calls << :healthy_service }
     value = described_class.new(Object.new, driver, config.with(logger: Logger.new(output), maintenance_services: [service, healthy_service]))
     waits = 0
-    value.define_singleton_method(:wait) do |_duration|
+    value.define_singleton_method(:wait) do |_duration, _condition = nil|
       waits += 1
       @stop_requested = true if waits == 2
     end
